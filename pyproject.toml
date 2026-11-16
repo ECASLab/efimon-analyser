@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nvidia-energy-attribution"
+version = "0.1.0"
+description = "Bayesian NVML/CUPTI GPU energy attribution workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.7"]
+test = ["pytest>=8", "pylint>=3"]
+
+[project.scripts]
+nvidia-kernel-energy = "energy_attribution.commands.kernel_energy:main"
+nvidia-kernel-energy-multisession = "energy_attribution.commands.kernel_energy_multisession:main"
+
+[tool.setuptools.packages.find]
+include = ["energy_attribution*"]
+exclude = ["energy_attribution.tests*"]
+
+[tool.pyink]
+line-length = 80
+
+[tool.pytest.ini_options]
+testpaths = ["energy_attribution/tests"]

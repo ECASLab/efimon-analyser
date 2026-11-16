@@ -1,0 +1,21 @@
+# Google Python style checks, as in EfiMon.
+repos:
+-   repo: https://github.com/google/pyink
+    rev: 26.5.1
+    hooks:
+    -   id: pyink
+-   repo: local
+    hooks:
+    -   id: pylint
+        name: pylint
+        entry: pylint --rcfile=pylintrc
+        language: system
+        types: [python]
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.1.0
+    hooks:
+    -   id: check-merge-conflict
+-   repo: https://github.com/jorisroovers/gitlint
+    rev: v0.17.0
+    hooks:
+    -   id: gitlint

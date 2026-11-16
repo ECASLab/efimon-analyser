@@ -1,0 +1,307 @@
+"""Columnar loaders for CUPTI kernel traces and NVML power telemetry."""
+
+import csv
+import gzip
+import logging
+import math
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Optional, TextIO
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+KERNEL_COLUMNS = ("start_ns", "end_ns", "kernel_name")
+KERNEL_CHUNK_ROWS = 200_000
+
+
+def require_fields(
+    fieldnames: Optional[Iterable[str]], required: Iterable[str], label: str
+) -> None:
+    """Raise ``ValueError`` naming the ``required`` columns a CSV lacks."""
+    missing = set(required) - set(fieldnames or [])
+    if missing:
+        raise ValueError(f"{label} CSV is missing columns: {sorted(missing)}")
+
+
+def open_text(path: Path) -> TextIO:
+    """Open a CSV for reading, transparently decompressing ``*.gz`` files."""
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", newline="", encoding="utf-8")
+    return path.open(newline="", encoding="utf-8")
+
+
+def read_csv_header(path: Path) -> list[str]:
+    """Return the column names of a CSV, or an empty list for an empty file."""
+    with open_text(path) as source:
+        return next(csv.reader(source), [])
+
+
+def write_csv(path: Path, rows: Iterable[dict], fieldnames: list[str]) -> None:
+    """Write ``rows`` to ``path`` as a CSV with the given column order."""
+    with path.open("w", newline="", encoding="utf-8") as destination:
+        writer = csv.DictWriter(destination, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+@dataclass
+class PowerTrace:
+    """Sorted, timestamp-deduplicated NVML power samples.
+
+    ``temperature_c`` is ``None`` when the CSV has no ``temperature_c``
+    column; unparsable temperatures are NaN.
+    """
+
+    timestamps_ns: np.ndarray
+    power_mw: np.ndarray
+    temperature_c: Optional[np.ndarray] = None
+
+    @property
+    def first_ns(self) -> int:
+        """Timestamp of the first sample."""
+        return int(self.timestamps_ns[0])
+
+    @property
+    def last_ns(self) -> int:
+        """Timestamp of the last sample."""
+        return int(self.timestamps_ns[-1])
+
+
+def load_power_trace(path: Path) -> PowerTrace:
+    """Read an NVML telemetry CSV into a sorted power trace.
+
+    Rows whose timestamp or power do not parse are skipped with a warning.
+    When several samples share a timestamp the last one is kept.
+
+    Args:
+      path: ``gpu_telemetry.csv`` with ``timestamp_ns`` and ``power_mw``, and
+        optionally ``temperature_c``.
+
+    Returns:
+      The deduplicated samples in timestamp order.
+
+    Raises:
+      ValueError: If columns are missing or fewer than two distinct
+        timestamps remain.
+    """
+    samples = []
+    skipped = 0
+    with path.open(newline="", encoding="utf-8") as source:
+        reader = csv.DictReader(source)
+        require_fields(
+            reader.fieldnames, {"timestamp_ns", "power_mw"}, "Telemetry"
+        )
+        has_temperature = "temperature_c" in reader.fieldnames
+        for row in reader:
+            try:
+                sample = (int(row["timestamp_ns"]), float(row["power_mw"]))
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            temperature = math.nan
+            if has_temperature:
+                try:
+                    temperature = float(row["temperature_c"])
+                except (TypeError, ValueError):
+                    pass
+            samples.append(sample + (temperature,))
+    if skipped:
+        logger.warning("Skipped %d invalid telemetry rows.", skipped)
+    samples.sort()
+    deduplicated = []
+    for sample in samples:
+        if deduplicated and sample[0] == deduplicated[-1][0]:
+            deduplicated[-1] = sample
+        else:
+            deduplicated.append(sample)
+    if len(deduplicated) < 2:
+        raise ValueError(
+            "At least two distinct telemetry timestamps are required"
+        )
+    return PowerTrace(
+        np.fromiter((sample[0] for sample in deduplicated), dtype=np.int64),
+        np.fromiter((sample[1] for sample in deduplicated), dtype=np.float64),
+        (
+            np.fromiter(
+                (sample[2] for sample in deduplicated), dtype=np.float64
+            )
+            if has_temperature
+            else None
+        ),
+    )
+
+
+@dataclass
+class KernelTable:
+    """Valid kernel events in file order, with names stored as integer codes.
+
+    Rows are kept only when start/end parse as integers, end > start and the
+    kernel name is non-empty, matching the original streaming parsers.
+    """
+
+    path: Path
+    start_ns: np.ndarray
+    end_ns: np.ndarray
+    name_codes: np.ndarray
+    names: list
+    event_ids: Optional[np.ndarray] = None
+    skipped: int = 0
+
+    def __len__(self) -> int:
+        return len(self.start_ns)
+
+    @property
+    def first_start(self) -> int:
+        """Start of the first event."""
+        return int(self.start_ns[0])
+
+    @property
+    def last_end(self) -> int:
+        """Latest end over all events."""
+        return int(self.end_ns.max())
+
+    def name_statistics(self) -> tuple[Counter, Counter]:
+        """Return (duration_by_name, event_count_by_name) Counters.
+
+        Names are inserted in first-appearance order so ``most_common`` breaks
+        ties exactly like the original row-by-row Counter updates.
+        """
+        durations = np.zeros(len(self.names), dtype=np.int64)
+        np.add.at(durations, self.name_codes, self.end_ns - self.start_ns)
+        counts = np.bincount(self.name_codes, minlength=len(self.names))
+        return (
+            Counter(dict(zip(self.names, durations.tolist()))),
+            Counter(dict(zip(self.names, counts.tolist()))),
+        )
+
+
+def _parse_int_column(
+    values: pd.Series,
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """Parse a string column to int64.
+
+    Args:
+      values: Column of integer strings.
+
+    Returns:
+      The parsed values and a validity mask, or ``None`` as the mask when
+      every value parsed.
+    """
+    try:
+        return values.astype(np.int64).to_numpy(), None
+    except (TypeError, ValueError, OverflowError):
+        parsed = np.zeros(len(values), dtype=np.int64)
+        valid = np.zeros(len(values), dtype=bool)
+        for index, value in enumerate(values.tolist()):
+            try:
+                parsed[index] = int(value)
+                valid[index] = True
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return parsed, valid
+
+
+def load_kernels(
+    path: Path,
+    load_event_ids: bool = False,
+    chunk_rows: int = KERNEL_CHUNK_ROWS,
+) -> KernelTable:
+    """Read a CUPTI kernel CSV (optionally ``.gz``) into numpy columns.
+
+    Args:
+      path: ``kernel_activity.csv`` or ``kernel_activity.csv.gz``.
+      load_event_ids: Also read the ``event_id`` column when present.
+      chunk_rows: Rows parsed per chunk, bounding peak memory.
+
+    Returns:
+      The valid events in file order; invalid rows are counted in
+      ``skipped``.
+
+    Raises:
+      ValueError: If columns are missing, events come from several devices
+        or rows are not sorted by start time.
+    """
+    header = read_csv_header(path)
+    require_fields(header, KERNEL_COLUMNS, "kernels")
+    columns = list(KERNEL_COLUMNS)
+    has_event_ids = load_event_ids and "event_id" in header
+    if has_event_ids:
+        columns.append("event_id")
+    has_device_ids = "device_id" in header
+    if has_device_ids:
+        columns.append("device_id")
+    device_ids = set()
+
+    code_by_name = {}
+    names = []
+    starts, ends, codes, event_ids = [], [], [], []
+    skipped = 0
+    reader = pd.read_csv(
+        path,
+        usecols=columns,
+        dtype=str,
+        keep_default_na=False,
+        na_filter=False,
+        chunksize=chunk_rows,
+        encoding="utf-8",
+    )
+    for chunk in reader:
+        start, start_valid = _parse_int_column(chunk["start_ns"])
+        end, end_valid = _parse_int_column(chunk["end_ns"])
+        # Truncated rows (e.g. a partially flushed last line) yield NaN.
+        name_values = chunk["kernel_name"].fillna("").to_numpy()
+        valid = (end > start) & (name_values != "")
+        for mask in (start_valid, end_valid):
+            if mask is not None:
+                valid &= mask
+        skipped += int(len(valid) - valid.sum())
+        if has_device_ids:
+            device_ids.update(chunk["device_id"].to_numpy()[valid])
+
+        chunk_codes, chunk_names = pd.factorize(name_values[valid])
+        global_codes = np.empty(len(chunk_names), dtype=np.int32)
+        for local_code, name in enumerate(chunk_names):
+            code = code_by_name.get(name)
+            if code is None:
+                code = code_by_name[name] = len(names)
+                names.append(name)
+            global_codes[local_code] = code
+
+        starts.append(start[valid])
+        ends.append(end[valid])
+        codes.append(global_codes[chunk_codes])
+        if has_event_ids:
+            ids, ids_valid = _parse_int_column(chunk["event_id"])
+            if ids_valid is not None:
+                ids[~ids_valid] = -1
+            event_ids.append(ids[valid])
+
+    def concatenate(parts: list, dtype: type) -> np.ndarray:
+        """Join chunk arrays, or return an empty array of ``dtype``."""
+        return np.concatenate(parts) if parts else np.empty(0, dtype=dtype)
+
+    table = KernelTable(
+        path=path,
+        start_ns=concatenate(starts, np.int64),
+        end_ns=concatenate(ends, np.int64),
+        name_codes=concatenate(codes, np.int32),
+        names=names,
+        event_ids=concatenate(event_ids, np.int64) if has_event_ids else None,
+        skipped=skipped,
+    )
+    if len(device_ids) > 1:
+        # The telemetry measures a single GPU.
+        devices = ", ".join(sorted(device_ids))
+        raise ValueError(
+            f"Kernel rows come from devices {devices}; "
+            "capture one device per run"
+        )
+    if len(table) > 1 and np.any(np.diff(table.start_ns) < 0):
+        raise ValueError(
+            "Kernel rows must be sorted by start_ns for streaming analysis"
+        )
+    return table
