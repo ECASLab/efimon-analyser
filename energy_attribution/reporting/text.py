@@ -5,12 +5,30 @@
 
 
 import re
+from typing import TYPE_CHECKING, Optional
 
 from energy_attribution.diagnostics import log_identifiability_warnings
 from energy_attribution.families import OTHER_FAMILY, TEMPERATURE_FAMILY
 
+if TYPE_CHECKING:
+    from energy_attribution.workflows.multisession import MultiSessionResult
+    from energy_attribution.workflows.single_session import SingleSessionResult
 
-def short_kernel_name(name, limit=52):
+
+def short_kernel_name(name: str, limit: int = 52) -> str:
+    """Return a readable label of a kernel or family name.
+
+    Special families get plain names, common llama.cpp kernels compact
+    labels, and other mangled CUDA symbols their function name. Names
+    longer than ``limit`` characters are cut.
+
+    Args:
+      name: Kernel or family name.
+      limit: Longest returned label.
+
+    Returns:
+      The label.
+    """
     if name == OTHER_FAMILY:
         return "Other kernels"
     if name == TEMPERATURE_FAMILY:
@@ -44,15 +62,23 @@ def short_kernel_name(name, limit=52):
     return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
-def short_session_name(name):
+def short_session_name(name: str) -> str:
+    """Drop the trailing hexadecimal capture ID from a session name."""
     return re.sub(r"-[0-9a-f]{10,}$", "", name)
 
 
-def format_optional(value, pattern):
+def format_optional(value: Optional[float], pattern: str) -> str:
+    """Format ``value`` with ``pattern``, or return ``"n/a"`` for ``None``."""
     return "n/a" if value is None else pattern.format(value)
 
 
-def print_coverage(test_metrics, session_metrics):
+def print_coverage(test_metrics: dict, session_metrics: dict) -> None:
+    """Print the 95% interval coverage of windows and sessions.
+
+    Args:
+      test_metrics: Window metrics of the holdout.
+      session_metrics: Metrics across sessions.
+    """
     credible = format_optional(
         test_metrics["credible_interval_95_coverage"], "{:.1%}"
     )
@@ -70,7 +96,13 @@ def print_coverage(test_metrics, session_metrics):
     )
 
 
-def print_energy_balance(accounting, *, detailed):
+def print_energy_balance(accounting: dict, *, detailed: bool) -> None:
+    """Print how measured energy splits into attributed and baseline energy.
+
+    Args:
+      accounting: Output of :func:`energy_accounting`.
+      detailed: Also print the measured and assignable totals.
+    """
     if detailed:
         print(
             "Measured dynamic energy: "
@@ -92,14 +124,15 @@ def print_energy_balance(accounting, *, detailed):
     print(f"Conservation error: {accounting['conservation_error_mj']:.6g} mJ")
 
 
-def print_test_fit(test_metrics, session_metrics):
+def print_test_fit(test_metrics: dict, session_metrics: dict) -> None:
+    """Print holdout RMSE, R-squared and interval coverage."""
     print(f"Test power RMSE: {test_metrics['rmse_w']:.3f} W")
     if test_metrics["r_squared"] is not None:
         print(f"Test power R-squared: {test_metrics['r_squared']:.4f}")
     print_coverage(test_metrics, session_metrics)
 
 
-def print_single_session_report(result):
+def print_single_session_report(result: "SingleSessionResult") -> None:
     """Console summary of :class:`SingleSessionResult`."""
     summary = result.summary
     print("=== Bayesian kernel-energy attribution ===")
@@ -112,7 +145,7 @@ def print_single_session_report(result):
     print(f"Results: {result.config.output_dir}")
 
 
-def print_multisession_report(result):
+def print_multisession_report(result: "MultiSessionResult") -> None:
     """Console summary of :class:`MultiSessionResult`."""
     print("\n=== Multi-session Bayesian kernel-energy attribution ===")
     print(f"Included sessions: {len(result.included_sessions)}")

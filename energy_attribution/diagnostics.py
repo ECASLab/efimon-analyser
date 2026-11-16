@@ -1,6 +1,7 @@
 """Identifiability checks for kernel-family regression designs."""
 
 import logging
+from typing import Callable
 
 import numpy as np
 
@@ -11,12 +12,22 @@ logger = logging.getLogger(__name__)
 ALIAS_RELATIVE_RESIDUAL = 1e-6
 
 
-def aliased_columns(train_design, tolerance=ALIAS_RELATIVE_RESIDUAL):
+def aliased_columns(
+    train_design: np.ndarray, tolerance: float = ALIAS_RELATIVE_RESIDUAL
+) -> list[int]:
     """Columns that are (numerically) a linear combination of the others.
 
     Their coefficients are not identified by the data: the likelihood is flat
     along a direction that trades them off against other columns, so their
     posterior is shaped by the prior and the non-negativity constraint.
+
+    Args:
+      train_design: (windows, parameters) training design.
+      tolerance: Largest relative least-squares residual of an aliased
+        column.
+
+    Returns:
+      Indices of the aliased columns.
     """
     column_scale = np.sqrt(np.mean(train_design * train_design, axis=0))
     active = column_scale > 1e-12
@@ -36,17 +47,29 @@ def aliased_columns(train_design, tolerance=ALIAS_RELATIVE_RESIDUAL):
 
 
 def check_identifiability(
-    design,
-    train_count,
-    terms,
-    min_windows_per_parameter=DEFAULT_MIN_WINDOWS_PER_PARAMETER,
-    allow_underdetermined=False,
-):
+    design: np.ndarray,
+    train_count: int,
+    terms: list[str],
+    min_windows_per_parameter: float = DEFAULT_MIN_WINDOWS_PER_PARAMETER,
+    allow_underdetermined: bool = False,
+) -> dict:
     """Validate the training design and describe poorly identified terms.
 
-    Raises ``ValueError`` when there are fewer than
-    ``min_windows_per_parameter`` training windows per parameter, unless
-    ``allow_underdetermined`` is set. Returns a JSON-serializable report.
+    Args:
+      design: (windows, parameters) design; the first column is the
+        intercept.
+      train_count: Number of leading training rows.
+      terms: Name of each design column.
+      min_windows_per_parameter: Required training windows per parameter.
+      allow_underdetermined: Only warn when that requirement is not met.
+
+    Returns:
+      A JSON-serializable report: rank, aliased terms and families active
+      only in the holdout.
+
+    Raises:
+      ValueError: If there are too few training windows per parameter and
+        ``allow_underdetermined`` is not set.
     """
     parameters = design.shape[1]
     required = int(np.ceil(min_windows_per_parameter * parameters))
@@ -101,8 +124,15 @@ def check_identifiability(
     return report
 
 
-def log_identifiability_warnings(report, label=str):
-    """Log rank deficiency, aliased terms and holdout-only families."""
+def log_identifiability_warnings(
+    report: dict, label: Callable[[str], str] = str
+) -> None:
+    """Log rank deficiency, aliased terms and holdout-only families.
+
+    Args:
+      report: Output of :func:`check_identifiability`.
+      label: Shortens a term name for the log message.
+    """
     if report["design_matrix_rank"] < report["parameters"]:
         logger.warning(
             "Kernel-family activity is not fully identifiable "

@@ -1,6 +1,7 @@
 """Posterior predictions, credible/predictive intervals and holdout metrics."""
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -24,7 +25,17 @@ class PosteriorPredictions:
     predictive_draws: np.ndarray
 
 
-def regression_metrics(actual, predicted):
+def regression_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict:
+    """Return count, MAE, RMSE and R-squared of a power prediction.
+
+    Args:
+      actual: Measured power in watts.
+      predicted: Predicted power in watts, aligned with ``actual``.
+
+    Returns:
+      A dictionary with ``count``, ``mae_w``, ``rmse_w`` and ``r_squared``;
+      ``r_squared`` is ``None`` when the measured power is constant.
+    """
     residual = actual - predicted
     total_variation = float(np.sum((actual - actual.mean()) ** 2))
     squared_error = float(residual @ residual)
@@ -40,19 +51,32 @@ def regression_metrics(actual, predicted):
     }
 
 
-def interval_coverage(actual, lower, upper):
+def interval_coverage(
+    actual: np.ndarray, lower: np.ndarray, upper: np.ndarray
+) -> Optional[float]:
+    """Return the share of ``actual`` inside ``[lower, upper]``, or ``None``."""
     if len(actual) == 0:
         return None
     return float(np.mean((actual >= lower) & (actual <= upper)))
 
 
-def summarize_predictions(prediction_draws, noise_draws, seed):
+def summarize_predictions(
+    prediction_draws: np.ndarray, noise_draws: np.ndarray, seed: int
+) -> PosteriorPredictions:
     """Posterior mean plus credible and predictive 95% intervals per window.
 
     ``prediction_draws`` reflect only coefficient uncertainty (credible). A
     measured window also carries observation noise sigma, so intervals meant
     to contain measurements add N(0, sigma^2) from the same draw (predictive).
     Power is non-negative, so predictive draws are clipped at zero.
+
+    Args:
+      prediction_draws: (draws, windows) latent mean power in watts.
+      noise_draws: Observation variance of each draw (W^2).
+      seed: Seed of the predictive noise.
+
+    Returns:
+      The mean, credible and predictive bounds and both sets of draws.
     """
     rng = np.random.default_rng(seed)
     predictive_draws = np.maximum(
@@ -78,7 +102,15 @@ def summarize_predictions(prediction_draws, noise_draws, seed):
     )
 
 
-def add_prediction_columns(window_rows, predictions):
+def add_prediction_columns(
+    window_rows: list[dict], predictions: PosteriorPredictions
+) -> None:
+    """Add the predicted power mean and 95% bounds to each window row.
+
+    Args:
+      window_rows: Window records, updated in place.
+      predictions: Posterior predictions of the same windows.
+    """
     for index, row in enumerate(window_rows):
         row.update(
             {
@@ -99,8 +131,21 @@ def add_prediction_columns(window_rows, predictions):
         )
 
 
-def prediction_metrics(target_power_w, predictions, mask):
-    """Point-error metrics plus 95% interval coverage on the masked windows."""
+def prediction_metrics(
+    target_power_w: np.ndarray,
+    predictions: PosteriorPredictions,
+    mask: np.ndarray,
+) -> dict:
+    """Point-error metrics plus 95% interval coverage on the masked windows.
+
+    Args:
+      target_power_w: Measured power of every window in watts.
+      predictions: Posterior predictions of the same windows.
+      mask: Boolean selection of the evaluated windows.
+
+    Returns:
+      :func:`regression_metrics` plus credible and predictive coverage.
+    """
     actual = target_power_w[mask]
     metrics = regression_metrics(actual, predictions.mean[mask])
     metrics["credible_interval_95_coverage"] = interval_coverage(
@@ -116,7 +161,9 @@ def prediction_metrics(target_power_w, predictions, mask):
     return metrics
 
 
-def session_holdout_energy(window_rows, predictions):
+def session_holdout_energy(
+    window_rows: list[dict], predictions: PosteriorPredictions
+) -> tuple[list[dict], dict]:
     """Per-session totals over holdout windows: measured vs predicted energy.
 
     Intervals sum each posterior draw over the session's windows before taking
@@ -124,6 +171,14 @@ def session_holdout_energy(window_rows, predictions):
     bounds. The predictive total treats window noise as independent; NVML
     samples are autocorrelated, so it can still be too narrow. Power ranges
     skip truncated windows (shorter than half the session's longest).
+
+    Args:
+      window_rows: Window records with ``split``, ``session``,
+        ``duration_ns`` and ``dynamic_energy_mj``.
+      predictions: Posterior predictions of the same windows.
+
+    Returns:
+      One row per session and the metrics across sessions.
     """
     indices_by_session = {}
     for index, row in enumerate(window_rows):
@@ -195,7 +250,8 @@ def session_holdout_energy(window_rows, predictions):
         if row["energy_error_pct"] is not None
     ]
 
-    def coverage(prefix):
+    def coverage(prefix: str) -> float:
+        """Share of sessions whose measured energy is inside the bounds."""
         return float(
             np.mean(
                 [

@@ -40,7 +40,14 @@ class ModelConfig:  # pylint: disable=too-many-instance-attributes
         return int(self.window_ms * 1_000_000)
 
     def validate(self, *, minimum_families: int = 2) -> None:
-        """Reject invalid model settings before loading large input files."""
+        """Reject invalid model settings before loading large input files.
+
+        Args:
+          minimum_families: Smallest accepted ``max_families``.
+
+        Raises:
+          ValueError: If any setting is out of range.
+        """
         if self.window_ms <= 0.0:
             raise ValueError("window_ms must be greater than zero")
         if self.idle_power_mw < 0.0:
@@ -63,7 +70,7 @@ class ModelConfig:  # pylint: disable=too-many-instance-attributes
             raise ValueError(f"unknown attribution mode: {self.attribution}")
 
 
-def _validate_train_fraction(train_fraction):
+def _validate_train_fraction(train_fraction: float) -> None:
     if not 0.5 <= train_fraction < 1.0:
         raise ValueError("train_fraction must be in [0.5, 1.0)")
 

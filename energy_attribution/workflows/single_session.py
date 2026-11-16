@@ -21,7 +21,7 @@ from energy_attribution.allocation import (
     family_energy_rows,
     posterior_energy_allocation,
 )
-from energy_attribution.config import SingleSessionConfig
+from energy_attribution.config import ModelConfig, SingleSessionConfig
 from energy_attribution.dataset import WindowDataset, assign_splits
 from energy_attribution.diagnostics import check_identifiability
 from energy_attribution.families import family_columns, scan_kernel_families
@@ -67,11 +67,24 @@ class SingleSessionResult:  # pylint: disable=too-many-instance-attributes
     summary: dict
 
 
-def fit_posterior(config, dataset, terms, label="posterior"):
+def fit_posterior(
+    config: ModelConfig,
+    dataset: WindowDataset,
+    terms: list[str],
+    label: str = "posterior",
+) -> tuple[dict, PosteriorSamples, PosteriorPredictions]:
     """Check identifiability, then sample the non-negative regression.
 
-    Shared by the single- and multi-session workflows. Returns
-    ``(identifiability, posterior, predictions)``.
+    Shared by the single- and multi-session workflows.
+
+    Args:
+      config: Prior, sampler and identifiability settings.
+      dataset: Windows with train rows first.
+      terms: Name of each design column.
+      label: Name of the fit in the progress message.
+
+    Returns:
+      ``(identifiability, posterior, predictions)``.
     """
     identifiability = check_identifiability(
         dataset.design[dataset.mask("train", "test")],
@@ -102,8 +115,23 @@ def fit_posterior(config, dataset, terms, label="posterior"):
     return identifiability, posterior, predictions
 
 
-def allocate_energy(config, dataset, posterior, predictions):
-    """Split window energy and annotate the window rows with the results."""
+def allocate_energy(
+    config: ModelConfig,
+    dataset: WindowDataset,
+    posterior: PosteriorSamples,
+    predictions: PosteriorPredictions,
+) -> EnergyAllocation:
+    """Split window energy and annotate the window rows with the results.
+
+    Args:
+      config: Attribution mode.
+      dataset: The windows; their rows gain predictions and energy.
+      posterior: The fitted coefficients.
+      predictions: Posterior predictions of the windows.
+
+    Returns:
+      The posterior energy split.
+    """
     allocation = posterior_energy_allocation(
         posterior.coefficient_draws,
         dataset.activity_ns,
@@ -116,7 +144,9 @@ def allocate_energy(config, dataset, posterior, predictions):
     return allocation
 
 
-def holdout_metrics(dataset, predictions):
+def holdout_metrics(
+    dataset: WindowDataset, predictions: PosteriorPredictions
+) -> tuple[dict, dict, list[dict], dict]:
     """Return (train, test, session rows, session metrics) of a fit."""
     target = dataset.target_power_w
     return (
@@ -126,7 +156,15 @@ def holdout_metrics(dataset, predictions):
     )
 
 
-def attribution_description(attribution):
+def attribution_description(attribution: str) -> str:
+    """Describe an attribution mode for the JSON summary.
+
+    Args:
+      attribution: ``"model"`` or ``"active-fraction"``.
+
+    Returns:
+      A sentence for the summary.
+    """
     if attribution == "model":
         return (
             "Each window's measured dynamic energy is split in proportion to "
@@ -141,8 +179,20 @@ def attribution_description(attribution):
     )
 
 
-def build_summary(config, dataset, result_parts):
-    """Assemble the machine-readable JSON summary of one session."""
+def build_summary(
+    config: SingleSessionConfig, dataset: WindowDataset, result_parts: dict
+) -> dict:
+    """Assemble the machine-readable JSON summary of one session.
+
+    Args:
+      config: The analysis settings.
+      dataset: The session's windows.
+      result_parts: ``event_count``, ``families``, ``identifiability``,
+        ``posterior``, the train/test/session metrics and ``accounting``.
+
+    Returns:
+      The JSON-serializable summary.
+    """
     parts = result_parts
     return {
         "model": "nonnegative_bayesian_kernel_family_regression",
@@ -181,7 +231,17 @@ def build_summary(config, dataset, result_parts):
 
 
 def analyze(config: SingleSessionConfig) -> SingleSessionResult:
-    """Fit one session and attribute its energy without writing any file."""
+    """Fit one session and attribute its energy without writing any file.
+
+    Args:
+      config: Input files and model settings.
+
+    Returns:
+      The fit, predictions, energy split and JSON summary.
+
+    Raises:
+      ValueError: If the inputs are invalid or do not overlap in time.
+    """
     window_ns = config.window_ns
     trace = load_power_trace(config.telemetry)
     logger.info("Loading kernel events...")

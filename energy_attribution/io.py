@@ -7,6 +7,7 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Optional, TextIO
 
 import numpy as np
 import pandas as pd
@@ -17,25 +18,30 @@ KERNEL_COLUMNS = ("start_ns", "end_ns", "kernel_name")
 KERNEL_CHUNK_ROWS = 200_000
 
 
-def require_fields(fieldnames, required, label):
+def require_fields(
+    fieldnames: Optional[Iterable[str]], required: Iterable[str], label: str
+) -> None:
+    """Raise ``ValueError`` naming the ``required`` columns a CSV lacks."""
     missing = set(required) - set(fieldnames or [])
     if missing:
         raise ValueError(f"{label} CSV is missing columns: {sorted(missing)}")
 
 
-def open_text(path):
+def open_text(path: Path) -> TextIO:
     """Open a CSV for reading, transparently decompressing ``*.gz`` files."""
     if path.suffix == ".gz":
         return gzip.open(path, "rt", newline="", encoding="utf-8")
     return path.open(newline="", encoding="utf-8")
 
 
-def read_csv_header(path):
+def read_csv_header(path: Path) -> list[str]:
+    """Return the column names of a CSV, or an empty list for an empty file."""
     with open_text(path) as source:
         return next(csv.reader(source), [])
 
 
-def write_csv(path, rows, fieldnames):
+def write_csv(path: Path, rows: Iterable[dict], fieldnames: list[str]) -> None:
+    """Write ``rows`` to ``path`` as a CSV with the given column order."""
     with path.open("w", newline="", encoding="utf-8") as destination:
         writer = csv.DictWriter(destination, fieldnames=fieldnames)
         writer.writeheader()
@@ -52,18 +58,36 @@ class PowerTrace:
 
     timestamps_ns: np.ndarray
     power_mw: np.ndarray
-    temperature_c: np.ndarray = None
+    temperature_c: Optional[np.ndarray] = None
 
     @property
-    def first_ns(self):
+    def first_ns(self) -> int:
+        """Timestamp of the first sample."""
         return int(self.timestamps_ns[0])
 
     @property
-    def last_ns(self):
+    def last_ns(self) -> int:
+        """Timestamp of the last sample."""
         return int(self.timestamps_ns[-1])
 
 
-def load_power_trace(path):
+def load_power_trace(path: Path) -> PowerTrace:
+    """Read an NVML telemetry CSV into a sorted power trace.
+
+    Rows whose timestamp or power do not parse are skipped with a warning.
+    When several samples share a timestamp the last one is kept.
+
+    Args:
+      path: ``gpu_telemetry.csv`` with ``timestamp_ns`` and ``power_mw``, and
+        optionally ``temperature_c``.
+
+    Returns:
+      The deduplicated samples in timestamp order.
+
+    Raises:
+      ValueError: If columns are missing or fewer than two distinct
+        timestamps remain.
+    """
     samples = []
     skipped = 0
     with path.open(newline="", encoding="utf-8") as source:
@@ -124,21 +148,23 @@ class KernelTable:
     end_ns: np.ndarray
     name_codes: np.ndarray
     names: list
-    event_ids: np.ndarray = None
+    event_ids: Optional[np.ndarray] = None
     skipped: int = 0
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.start_ns)
 
     @property
-    def first_start(self):
+    def first_start(self) -> int:
+        """Start of the first event."""
         return int(self.start_ns[0])
 
     @property
-    def last_end(self):
+    def last_end(self) -> int:
+        """Latest end over all events."""
         return int(self.end_ns.max())
 
-    def name_statistics(self):
+    def name_statistics(self) -> tuple[Counter, Counter]:
         """Return (duration_by_name, event_count_by_name) Counters.
 
         Names are inserted in first-appearance order so ``most_common`` breaks
@@ -153,8 +179,18 @@ class KernelTable:
         )
 
 
-def _parse_int_column(values):
-    """Parse a string column to int64, returning (values, valid_mask)."""
+def _parse_int_column(
+    values: pd.Series,
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """Parse a string column to int64.
+
+    Args:
+      values: Column of integer strings.
+
+    Returns:
+      The parsed values and a validity mask, or ``None`` as the mask when
+      every value parsed.
+    """
     try:
         return values.astype(np.int64).to_numpy(), None
     except (TypeError, ValueError, OverflowError):
@@ -169,8 +205,26 @@ def _parse_int_column(values):
         return parsed, valid
 
 
-def load_kernels(path, load_event_ids=False, chunk_rows=KERNEL_CHUNK_ROWS):
-    """Read a CUPTI kernel CSV (optionally ``.gz``) into numpy columns."""
+def load_kernels(
+    path: Path,
+    load_event_ids: bool = False,
+    chunk_rows: int = KERNEL_CHUNK_ROWS,
+) -> KernelTable:
+    """Read a CUPTI kernel CSV (optionally ``.gz``) into numpy columns.
+
+    Args:
+      path: ``kernel_activity.csv`` or ``kernel_activity.csv.gz``.
+      load_event_ids: Also read the ``event_id`` column when present.
+      chunk_rows: Rows parsed per chunk, bounding peak memory.
+
+    Returns:
+      The valid events in file order; invalid rows are counted in
+      ``skipped``.
+
+    Raises:
+      ValueError: If columns are missing, events come from several devices
+        or rows are not sorted by start time.
+    """
     header = read_csv_header(path)
     require_fields(header, KERNEL_COLUMNS, "kernels")
     columns = list(KERNEL_COLUMNS)
@@ -226,7 +280,8 @@ def load_kernels(path, load_event_ids=False, chunk_rows=KERNEL_CHUNK_ROWS):
                 ids[~ids_valid] = -1
             event_ids.append(ids[valid])
 
-    def concatenate(parts, dtype):
+    def concatenate(parts: list, dtype: type) -> np.ndarray:
+        """Join chunk arrays, or return an empty array of ``dtype``."""
         return np.concatenate(parts) if parts else np.empty(0, dtype=dtype)
 
     table = KernelTable(

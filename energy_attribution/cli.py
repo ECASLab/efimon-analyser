@@ -8,7 +8,7 @@ import argparse
 import logging
 import sys
 from dataclasses import MISSING, fields
-from typing import TypeVar
+from typing import Any, Callable, Optional, Sequence, TypeVar
 
 from energy_attribution.config import ATTRIBUTION_MODES
 
@@ -52,8 +52,16 @@ HELP = {
 }
 
 
-def add_config_arguments(parser, config_type):
-    """Add one option per dataclass field, using the field's default."""
+def add_config_arguments(
+    parser: argparse.ArgumentParser, config_type: type
+) -> None:
+    """Add one option per dataclass field, using the field's default.
+
+    Args:
+      parser: Parser that receives the options.
+      config_type: Configuration dataclass; boolean fields become flags and
+        fields without a default become required options.
+    """
     for field in fields(config_type):
         option = "--" + field.name.replace("_", "-")
         options = {"help": HELP.get(field.name)}
@@ -70,11 +78,21 @@ def add_config_arguments(parser, config_type):
         parser.add_argument(option, **options)
 
 
-def config_from_namespace(config_type: type[ConfigT], namespace) -> ConfigT:
+def config_from_namespace(
+    config_type: type[ConfigT], namespace: argparse.Namespace
+) -> ConfigT:
     """Construct a config from an argparse namespace, field by field.
 
-    Raises ``ValueError`` when the namespace lacks a field or carries an
-    option the config does not define, instead of silently using a default.
+    Args:
+      config_type: Configuration dataclass to build.
+      namespace: Parsed options, one per field.
+
+    Returns:
+      The configuration.
+
+    Raises:
+      ValueError: If the namespace lacks a field or carries an option the
+        config does not define, instead of silently using a default.
     """
     names = {field.name for field in fields(config_type)}
     provided = set(vars(namespace))
@@ -90,14 +108,14 @@ def config_from_namespace(config_type: type[ConfigT], namespace) -> ConfigT:
 class _ConsoleFormatter(logging.Formatter):
     """Plain progress messages; warnings keep their historical prefix."""
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         message = record.getMessage()
         if record.levelno >= logging.WARNING:
             return f"{record.levelname}: {message}"
         return message
 
 
-def configure_logging(level=logging.INFO):
+def configure_logging(level: int = logging.INFO) -> None:
     """Send package log records to stdout as the commands always printed."""
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(_ConsoleFormatter())
@@ -107,10 +125,26 @@ def configure_logging(level=logging.INFO):
     logger.propagate = False
 
 
-def run_command(config_type, description, analysis, report, argv=None):
+def run_command(
+    config_type: type,
+    description: str,
+    analysis: Callable[[Any], Any],
+    report: Callable[[Any], None],
+    argv: Optional[Sequence[str]] = None,
+) -> Any:
     """Parse ``argv``, run ``analysis`` and print ``report``.
 
     Configuration and input errors exit with status 1 and a one-line message.
+
+    Args:
+      config_type: Configuration dataclass that defines the options.
+      description: Help text of the command.
+      analysis: Function that runs the analysis on the configuration.
+      report: Function that prints the result.
+      argv: Arguments to parse; ``None`` reads ``sys.argv``.
+
+    Returns:
+      The analysis result.
     """
     parser = argparse.ArgumentParser(description=description)
     add_config_arguments(parser, config_type)

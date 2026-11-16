@@ -2,28 +2,48 @@
 
 import numpy as np
 
+from energy_attribution.io import KernelTable, PowerTrace
 from energy_attribution.units import NS_PER_SECOND
 
 EVENT_CHUNK = 1_000_000
 
 
-def window_count(analysis_start, analysis_end, window_ns):
+def window_count(analysis_start: int, analysis_end: int, window_ns: int) -> int:
+    """Number of windows covering the span; the last may be truncated."""
     return -(-(analysis_end - analysis_start) // window_ns)
 
 
-def window_bounds(analysis_start, analysis_end, window_ns):
+def window_bounds(
+    analysis_start: int, analysis_end: int, window_ns: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the start and end of every window, clipped to the span."""
     starts = analysis_start + window_ns * np.arange(
         window_count(analysis_start, analysis_end, window_ns), dtype=np.int64
     )
     return starts, np.minimum(starts + window_ns, analysis_end)
 
 
-def split_by_windows(starts, ends, analysis_start, analysis_end, window_ns):
+def split_by_windows(
+    starts: np.ndarray,
+    ends: np.ndarray,
+    analysis_start: int,
+    analysis_end: int,
+    window_ns: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Clip intervals to the analysis range and cut them at window edges.
 
-    Returns ``(owner, window, overlap_ns)`` with one entry per interval/window
-    piece, ordered by interval and then by window. ``owner`` indexes into the
-    input arrays. Intervals entirely outside the range produce no pieces.
+    Args:
+      starts: Interval starts in nanoseconds.
+      ends: Interval ends in nanoseconds.
+      analysis_start: First nanosecond of the span.
+      analysis_end: Last nanosecond of the span.
+      window_ns: Nominal window length.
+
+    Returns:
+      ``(owner, window, overlap_ns)`` with one entry per interval/window
+      piece, ordered by interval and then by window. ``owner`` indexes into
+      the input arrays. Intervals entirely outside the range produce no
+      pieces.
     """
     clipped_start = np.maximum(starts, analysis_start)
     clipped_end = np.minimum(ends, analysis_end)
@@ -53,13 +73,21 @@ def split_by_windows(starts, ends, analysis_start, analysis_end, window_ns):
     return np.repeat(inside, spans), window, overlap
 
 
-def uncovered_pieces(starts, ends, covered_until):
+def uncovered_pieces(
+    starts: np.ndarray, ends: np.ndarray, covered_until: int
+) -> tuple[np.ndarray, np.ndarray, int]:
     """Parts of start-sorted intervals not covered by earlier intervals.
 
-    ``covered_until`` is the running maximum end of all preceding intervals.
     The returned pieces are disjoint and their union equals the union of the
     inputs, so summing their window overlaps gives kernel-union busy time.
-    Returns ``(piece_start, piece_end, new_covered_until)``.
+
+    Args:
+      starts: Interval starts, sorted ascending.
+      ends: Interval ends.
+      covered_until: Running maximum end of all preceding intervals.
+
+    Returns:
+      ``(piece_start, piece_end, new_covered_until)``.
     """
     running_end = np.maximum.accumulate(ends)
     previous_end = np.empty_like(running_end)
@@ -74,12 +102,29 @@ def uncovered_pieces(starts, ends, covered_until):
 
 
 def aggregate_family_activity(
-    table, columns, family_count, analysis_start, analysis_end, window_ns
-):
+    table: KernelTable,
+    columns: np.ndarray,
+    family_count: int,
+    analysis_start: int,
+    analysis_end: int,
+    window_ns: int,
+) -> tuple[np.ndarray, np.ndarray]:
     """Return per-window family busy time and kernel-union busy time (ns).
 
     Events are processed in chunks to bound memory; all sums are of integer
     nanoseconds, so results are exact and independent of chunking.
+
+    Args:
+      table: Kernel events sorted by start time.
+      columns: Family column of each event.
+      family_count: Number of family columns.
+      analysis_start: First nanosecond of the span.
+      analysis_end: Last nanosecond of the span.
+      window_ns: Nominal window length.
+
+    Returns:
+      A (windows, families) busy-time matrix and the busy time of the union
+      of all kernels per window.
     """
     windows = window_count(analysis_start, analysis_end, window_ns)
     cells = windows * family_count
@@ -119,18 +164,30 @@ def aggregate_family_activity(
 
 
 def distribute_to_events(
-    table,
-    columns,
-    activity_ns,
-    window_family_values,
-    analysis_start,
-    analysis_end,
-    window_ns,
-):
+    table: KernelTable,
+    columns: np.ndarray,
+    activity_ns: np.ndarray,
+    window_family_values: list[np.ndarray],
+    analysis_start: int,
+    analysis_end: int,
+    window_ns: int,
+) -> list[np.ndarray]:
     """Spread (window, family) quantities to events by temporal overlap.
 
     Each event receives ``value[w, family] * overlap / activity_ns[w, family]``
-    summed over the windows it touches. Returns one array per input matrix.
+    summed over the windows it touches.
+
+    Args:
+      table: Kernel events sorted by start time.
+      columns: Family column of each event.
+      activity_ns: (windows, families) busy time per family.
+      window_family_values: (windows, families) matrices to distribute.
+      analysis_start: First nanosecond of the span.
+      analysis_end: Last nanosecond of the span.
+      window_ns: Nominal window length.
+
+    Returns:
+      One per-event array per input matrix.
     """
     outputs = [
         np.zeros(len(table), dtype=np.float64) for _ in window_family_values
@@ -157,11 +214,26 @@ def distribute_to_events(
     return outputs
 
 
-def integrate_windows(trace, window_starts, window_ends, idle_power_mw):
+def integrate_windows(
+    trace: PowerTrace,
+    window_starts: np.ndarray,
+    window_ends: np.ndarray,
+    idle_power_mw: float,
+) -> tuple[np.ndarray, np.ndarray]:
     """Trapezoidal device and dynamic energy (mJ) for every window.
 
     Uses the same per-segment arithmetic and summation order as the original
     O(windows x samples) scan, but visits only segments overlapping a window.
+
+    Args:
+      trace: Power samples; power is interpolated linearly between them.
+      window_starts: Start of each window in nanoseconds.
+      window_ends: End of each window in nanoseconds.
+      idle_power_mw: Power subtracted (and floored at zero) for the dynamic
+        energy.
+
+    Returns:
+      Device energy and dynamic energy of every window, in millijoules.
     """
     timestamps = trace.timestamps_ns.tolist()
     power = trace.power_mw.tolist()
@@ -209,14 +281,27 @@ def integrate_windows(trace, window_starts, window_ends, idle_power_mw):
 
 
 def build_windows(
-    trace,
-    union_active_ns,
-    analysis_start,
-    analysis_end,
-    window_ns,
-    idle_power_mw,
-):
-    """Return per-window diagnostic rows and the dynamic-power target (W)."""
+    trace: PowerTrace,
+    union_active_ns: np.ndarray,
+    analysis_start: int,
+    analysis_end: int,
+    window_ns: int,
+    idle_power_mw: float,
+) -> tuple[list[dict], np.ndarray]:
+    """Return per-window diagnostic rows and the dynamic-power target (W).
+
+    Args:
+      trace: Power samples of the session.
+      union_active_ns: Kernel-union busy time of each window.
+      analysis_start: First nanosecond of the span.
+      analysis_end: Last nanosecond of the span.
+      window_ns: Nominal window length.
+      idle_power_mw: Power subtracted for the dynamic energy.
+
+    Returns:
+      One record per window with its energies and active fraction, and the
+      mean dynamic power of each window in watts.
+    """
     window_starts, window_ends = window_bounds(
         analysis_start, analysis_end, window_ns
     )

@@ -3,7 +3,7 @@
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 
@@ -35,7 +35,7 @@ class KernelScan:  # pylint: disable=too-many-instance-attributes
     valid_events: int
 
 
-def source_names(family, all_names, selected):
+def source_names(family: str, all_names: Iterable[str], selected: set) -> set:
     """Kernel names whose events are counted under ``family``."""
     if family == TEMPERATURE_FAMILY:
         return set()
@@ -44,7 +44,9 @@ def source_names(family, all_names, selected):
     )
 
 
-def select_families(duration_by_name, max_families):
+def select_families(
+    duration_by_name: Counter, max_families: int
+) -> tuple[list[str], set]:
     """Rank kernel names by total duration; fold the tail into __other__."""
     ranked = [name for name, _ in duration_by_name.most_common()]
     if len(ranked) > max_families:
@@ -53,8 +55,22 @@ def select_families(duration_by_name, max_families):
     return ranked, set(ranked)
 
 
-def family_columns(table, selected, family_index):
-    """Map every event in ``table`` to its design-matrix family column."""
+def family_columns(
+    table: KernelTable, selected: set, family_index: dict
+) -> np.ndarray:
+    """Map every event in ``table`` to its design-matrix family column.
+
+    Args:
+      table: Loaded kernel events.
+      selected: Kernel names with their own family.
+      family_index: Column of each family.
+
+    Returns:
+      The family column of every event.
+
+    Raises:
+      ValueError: If an unselected kernel has no ``__other__`` column.
+    """
     lookup = np.empty(len(table.names), dtype=np.int64)
     for code, name in enumerate(table.names):
         family = name if name in selected else OTHER_FAMILY
@@ -67,8 +83,19 @@ def family_columns(table, selected, family_index):
     return lookup[table.name_codes]
 
 
-def scan_kernel_families(table, max_families):
-    """Summarize a loaded KernelTable and choose its family basis."""
+def scan_kernel_families(table: KernelTable, max_families: int) -> KernelScan:
+    """Summarize a loaded KernelTable and choose its family basis.
+
+    Args:
+      table: Loaded kernel events.
+      max_families: Maximum family columns, including ``__other__``.
+
+    Returns:
+      Per-name statistics and the selected families.
+
+    Raises:
+      ValueError: If the table has no valid events.
+    """
     if len(table) == 0:
         raise ValueError("No valid kernel events were found")
     if table.skipped:

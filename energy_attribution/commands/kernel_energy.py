@@ -1,8 +1,11 @@
 """``nvidia-kernel-energy``: attribute one session's energy to CUDA kernels."""
 
+from typing import Optional, Sequence
+
 from energy_attribution.api import run_single_session
 from energy_attribution.cli import run_command
 from energy_attribution.config import SingleSessionConfig
+from energy_attribution.workflows.single_session import SingleSessionResult
 from energy_attribution.reporting.text import print_single_session_report
 
 DESCRIPTION = (
@@ -11,7 +14,8 @@ DESCRIPTION = (
 )
 
 
-def main(argv=None):
+def main(argv: Optional[Sequence[str]] = None) -> SingleSessionResult:
+    """Run the command with ``argv`` (default ``sys.argv``)."""
     return run_command(
         SingleSessionConfig,
         DESCRIPTION,

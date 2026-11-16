@@ -4,6 +4,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -14,7 +15,7 @@ from energy_attribution.families import (
     scan_kernel_families,
     select_families,
 )
-from energy_attribution.io import load_kernels, load_power_trace
+from energy_attribution.io import PowerTrace, load_kernels, load_power_trace
 from energy_attribution.windows import aggregate_family_activity, build_windows
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class SessionInput:
     name: str
     telemetry: Path
     kernels: Path
-    scan: KernelScan = None
+    scan: Optional[KernelScan] = None
 
 
 @dataclass
@@ -60,7 +61,7 @@ class SessionWindows:
     train_count: int = 0
 
 
-def kernel_file(directory):
+def kernel_file(directory: Path) -> Optional[Path]:
     """Return the session's kernel CSV, preferring it over a ``.gz`` copy."""
     for name in (KERNELS_FILE, KERNELS_FILE + ".gz"):
         path = directory / name
@@ -69,8 +70,18 @@ def kernel_file(directory):
     return None
 
 
-def session_files(directory):
-    """Return the telemetry and kernel CSV paths of one session directory."""
+def session_files(directory: Path) -> tuple[Path, Path]:
+    """Return the telemetry and kernel CSV paths of one session directory.
+
+    Args:
+      directory: The session directory.
+
+    Returns:
+      The telemetry CSV and the (possibly gzip-compressed) kernel CSV.
+
+    Raises:
+      ValueError: If either file is missing.
+    """
     telemetry = directory / TELEMETRY_FILE
     kernels = kernel_file(directory)
     missing = [str(telemetry)] if not telemetry.is_file() else []
@@ -81,10 +92,19 @@ def session_files(directory):
     return telemetry, kernels
 
 
-def discover_session_paths(root):
+def discover_session_paths(root: Path) -> list[SessionInput]:
     """Sessions are the subdirectories of ``root`` holding both CSV files.
 
     The kernel CSV may be gzip-compressed (``kernel_activity.csv.gz``).
+
+    Args:
+      root: Directory whose subdirectories (or symlinks) are sessions.
+
+    Returns:
+      The sessions in name order.
+
+    Raises:
+      ValueError: If no subdirectory holds both files.
     """
     sessions = []
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
@@ -97,12 +117,24 @@ def discover_session_paths(root):
     return sessions
 
 
-def scan_sessions(session_inputs, max_families):
+def scan_sessions(
+    session_inputs: list[SessionInput], max_families: int
+) -> SessionScan:
     """Load every session's kernels and pick one family basis for all of them.
 
     Sessions without valid kernel events are excluded with their reason.
     Each session's event table is released once its statistics are known,
     so peak memory is one session's trace rather than all of them.
+
+    Args:
+      session_inputs: Sessions from :func:`discover_session_paths`.
+      max_families: Maximum family columns, including ``__other__``.
+
+    Returns:
+      The usable sessions, the excluded ones and the shared family basis.
+
+    Raises:
+      ValueError: If no session has valid kernel events.
     """
     active_sessions = []
     excluded_sessions = []
@@ -138,8 +170,19 @@ def scan_sessions(session_inputs, max_families):
     )
 
 
-def window_temperature_c(trace, rows):
-    """Telemetry temperature interpolated at every window's midpoint."""
+def window_temperature_c(trace: PowerTrace, rows: list[dict]) -> np.ndarray:
+    """Telemetry temperature interpolated at every window's midpoint.
+
+    Args:
+      trace: Power samples with temperature.
+      rows: Window records with ``start_ns`` and ``end_ns``.
+
+    Returns:
+      The temperature of each window in degrees C.
+
+    Raises:
+      ValueError: If the telemetry has no valid temperature.
+    """
     if trace.temperature_c is None:
         raise ValueError(
             "The temperature feature needs a temperature_c telemetry column"
@@ -159,12 +202,23 @@ def window_temperature_c(trace, rows):
 
 
 def add_temperature_column(
-    trace, rows, activity_ns, column, temperature_reference_c
-):
+    trace: PowerTrace,
+    rows: list[dict],
+    activity_ns: np.ndarray,
+    column: int,
+    temperature_reference_c: float,
+) -> None:
     """Fill ``column`` so its busy fraction is degrees above the reference.
 
     The design divides each column by the window length, so storing
     ``excess_c * duration_ns`` yields ``max(0, T - reference)`` in degrees C.
+
+    Args:
+      trace: Power samples with temperature.
+      rows: Window records; each gains ``temperature_c``.
+      activity_ns: (windows, families) matrix updated in place.
+      column: Index of the temperature column.
+      temperature_reference_c: Temperature at which the column is zero.
     """
     temperature = window_temperature_c(trace, rows)
     excess = np.maximum(0.0, temperature - temperature_reference_c)
@@ -175,18 +229,32 @@ def add_temperature_column(
 
 
 def build_session_windows(
-    session,
-    selected,
-    family_index,
-    window_ns,
-    idle_power_mw,
-    temperature_reference_c=None,
-):
+    session: SessionInput,
+    selected: set,
+    family_index: dict,
+    window_ns: int,
+    idle_power_mw: float,
+    temperature_reference_c: Optional[float] = None,
+) -> SessionWindows:
     """Aggregate one scanned session; releases its KernelTable afterwards.
 
     The table is reloaded from disk when ``scan_sessions`` already released it.
     When ``family_index`` holds the temperature column, it is filled with the
     window temperature above ``temperature_reference_c``.
+
+    Args:
+      session: A scanned session.
+      selected: Kernel names with their own family.
+      family_index: Column of each family.
+      window_ns: Nominal window length.
+      idle_power_mw: Power subtracted for the dynamic energy.
+      temperature_reference_c: Reference of the temperature column.
+
+    Returns:
+      The session's window rows, family activity and target power.
+
+    Raises:
+      ValueError: If telemetry and kernels do not overlap.
     """
     name, scan = session.name, session.scan
     logger.info("\n=== Aggregating %s ===", name)

@@ -4,9 +4,9 @@ Matplotlib is imported lazily inside ``create_plots`` so the analyses
 run without it unless ``--plot``.
 """
 
-# Subscripts inside f-strings need single quotes before Python 3.12.
-# pylint: disable=inconsistent-quotes
-
+from pathlib import Path
+from types import ModuleType
+from typing import Optional
 
 import numpy as np
 
@@ -18,7 +18,16 @@ from energy_attribution.reporting.text import (
 )
 
 
-def plot_kernel_family_energy(plt, output_dir, family_rows):
+def plot_kernel_family_energy(
+    plt: ModuleType, output_dir: Path, family_rows: list[dict]
+) -> None:
+    """Plot the 15 largest family energies with 95% intervals.
+
+    Args:
+      plt: ``matplotlib.pyplot``.
+      output_dir: Directory of ``bayesian_kernel_family_energy.png``.
+      family_rows: Family energy rows, largest first.
+    """
     top_families = family_rows[: min(15, len(family_rows))]
     labels = [short_kernel_name(row["kernel_family"]) for row in top_families]
     medians = np.asarray(
@@ -53,7 +62,16 @@ def plot_kernel_family_energy(plt, output_dir, family_rows):
     plt.close(figure)
 
 
-def build_plot_series(window_rows):
+def build_plot_series(window_rows: list[dict]) -> dict:
+    """Collect the measured and predicted series that the plots share.
+
+    Args:
+      window_rows: Non-excluded window records with predictions.
+
+    Returns:
+      Elapsed time, measured and predicted power and energy with their 95%
+      bounds, and ``test_start``, the index of the first test window.
+    """
     elapsed_seconds = np.asarray(
         [
             (row["start_ns"] - window_rows[0]["start_ns"]) / NS_PER_SECOND
@@ -122,7 +140,15 @@ def build_plot_series(window_rows):
     }
 
 
-def session_row_groups(window_rows):
+def session_row_groups(window_rows: list[dict]) -> list[tuple[str, list]]:
+    """Group window rows by session, each group in window order.
+
+    Args:
+      window_rows: Window records, optionally labelled with ``session``.
+
+    Returns:
+      ``(session, rows)`` pairs in order of first appearance.
+    """
     names = list(
         dict.fromkeys(row.get("session", "session") for row in window_rows)
     )
@@ -138,7 +164,16 @@ def session_row_groups(window_rows):
     return groups
 
 
-def plot_kernel_power_fit(plt, output_dir, window_rows):
+def plot_kernel_power_fit(
+    plt: ModuleType, output_dir: Path, window_rows: list[dict]
+) -> None:
+    """Plot measured and predicted power over time, one panel per session.
+
+    Args:
+      plt: ``matplotlib.pyplot``.
+      output_dir: Directory of ``bayesian_kernel_power_fit.png``.
+      window_rows: Non-excluded window records with predictions.
+    """
     groups = session_row_groups(window_rows)
     figure, axes = plt.subplots(
         len(groups),
@@ -202,7 +237,17 @@ def plot_kernel_power_fit(plt, output_dir, window_rows):
     plt.close(figure)
 
 
-def plot_kernel_energy_test_scatter(plt, output_dir, window_rows, series):
+def plot_kernel_energy_test_scatter(
+    plt: ModuleType, output_dir: Path, window_rows: list[dict], series: dict
+) -> None:
+    """Plot measured against predicted energy of the test windows.
+
+    Args:
+      plt: ``matplotlib.pyplot``.
+      output_dir: Directory of ``bayesian_kernel_energy_test_scatter.png``.
+      window_rows: Non-excluded window records with predictions.
+      series: Output of :func:`build_plot_series`.
+    """
     test_start = series["test_start"]
     actual = series["measured_energy"][test_start:]
     expected = series["predicted_energy"][test_start:]
@@ -293,8 +338,21 @@ REFERENCE_COLOR = "#8a8984"
 
 
 def plot_session_energy(
-    plt, output_dir, session_rows, session_metrics, test_metrics
-):
+    plt: ModuleType,
+    output_dir: Path,
+    session_rows: list[dict],
+    session_metrics: dict,
+    test_metrics: dict,
+) -> None:
+    """Plot measured against predicted holdout energy and power per session.
+
+    Args:
+      plt: ``matplotlib.pyplot``.
+      output_dir: Directory of ``bayesian_session_energy.png``.
+      session_rows: Holdout energy per session.
+      session_metrics: Metrics across sessions.
+      test_metrics: Window power metrics of the holdout.
+    """
     # Numbered markers (shared with the power panel's ticks) stay legible when
     # sessions with similar totals cluster; full names would collide.
     rows = sorted(
@@ -302,7 +360,7 @@ def plot_session_energy(
     )
     numbers = [str(index + 1) for index in range(len(rows))]
     labels = [
-        f"{number}  {short_session_name(row['session'])}"
+        number + "  " + short_session_name(row["session"])
         for number, row in zip(numbers, rows)
     ]
     measured = np.asarray([row["measured_energy_j"] for row in rows])
@@ -409,7 +467,8 @@ def plot_session_energy(
                 "Per window (power):",
                 "  R² = "
                 + format_optional(test_metrics["r_squared"], "{:.4f}"),
-                f"  RMSE = {test_metrics['rmse_w']:.3f} W",
+                "  RMSE = "
+                + format_optional(test_metrics["rmse_w"], "{:.3f} W"),
                 "  95% coverage: credible "
                 + format_optional(
                     test_metrics["credible_interval_95_coverage"], "{:.0%}"
@@ -476,13 +535,27 @@ def plot_session_energy(
 
 
 def create_plots(
-    output_dir,
-    window_rows,
-    family_rows,
-    session_rows=None,
-    session_metrics=None,
-    test_metrics=None,
-):
+    output_dir: Path,
+    window_rows: list[dict],
+    family_rows: list[dict],
+    session_rows: Optional[list[dict]] = None,
+    session_metrics: Optional[dict] = None,
+    test_metrics: Optional[dict] = None,
+) -> None:
+    """Write the kernel-energy diagnostic PNG files.
+
+    Args:
+      output_dir: Directory of the PNG files.
+      window_rows: Window records with predictions; excluded rows are
+        skipped.
+      family_rows: Family energy rows, largest first.
+      session_rows: Holdout energy per session; ``None`` skips that plot.
+      session_metrics: Metrics across sessions.
+      test_metrics: Window power metrics of the holdout.
+
+    Raises:
+      RuntimeError: If matplotlib is not installed.
+    """
     try:
         import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
     except ImportError as error:

@@ -6,6 +6,8 @@ regression tests.
 
 import json
 import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -14,22 +16,33 @@ from energy_attribution.io import write_csv
 from energy_attribution.reporting.plots import create_plots
 from energy_attribution.windows import EVENT_CHUNK
 
+if TYPE_CHECKING:
+    from energy_attribution.allocation import EventAttribution
+    from energy_attribution.workflows.multisession import MultiSessionResult
+    from energy_attribution.workflows.single_session import SingleSessionResult
+
 logger = logging.getLogger(__name__)
 
 
-def write_rows(path, rows):
+def write_rows(path: Path, rows: list[dict]) -> None:
     """Write dictionaries as CSV, using the first row's keys as columns."""
     write_csv(path, rows, list(rows[0]))
 
 
-def write_summary(path, summary):
+def write_summary(path: Path, summary: dict) -> None:
+    """Write ``summary`` as indented JSON."""
     with path.open("w", encoding="utf-8") as destination:
         json.dump(summary, destination, indent=2)
         destination.write("\n")
 
 
-def write_event_csv(path, events):
-    """Per-event energy in chunks; join to the CUPTI trace via event_id."""
+def write_event_csv(path: Path, events: "EventAttribution") -> None:
+    """Per-event energy in chunks; join to the CUPTI trace via event_id.
+
+    Args:
+      path: Destination CSV.
+      events: Posterior energy of every kernel event.
+    """
     family_names = np.asarray(events.families, dtype=object)
     for offset in range(0, len(events.start_ns), EVENT_CHUNK):
         chunk = slice(offset, offset + EVENT_CHUNK)
@@ -53,8 +66,15 @@ def write_event_csv(path, events):
         )
 
 
-def _write_kernel_model(result, output_dir):
-    """Outputs shared by the single- and multi-session kernel models."""
+def _write_kernel_model(
+    result: "SingleSessionResult | MultiSessionResult", output_dir: Path
+) -> None:
+    """Outputs shared by the single- and multi-session kernel models.
+
+    Args:
+      result: A kernel-model result.
+      output_dir: Destination directory, created when missing.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     write_rows(output_dir / "bayesian_energy_windows.csv", result.dataset.rows)
     write_rows(
@@ -75,7 +95,8 @@ def _write_kernel_model(result, output_dir):
         )
 
 
-def write_single_session(result):
+def write_single_session(result: "SingleSessionResult") -> None:
+    """Write the CSV, JSON and optional PNG outputs of one session."""
     output_dir = result.config.output_dir
     _write_kernel_model(result, output_dir)
     if result.events is not None:
@@ -88,7 +109,8 @@ def write_single_session(result):
     )
 
 
-def write_multisession(result):
+def write_multisession(result: "MultiSessionResult") -> None:
+    """Write the CSV, JSON and optional PNG outputs of a pooled model."""
     output_dir = result.config.output_dir
     _write_kernel_model(result, output_dir)
     write_summary(

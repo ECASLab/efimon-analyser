@@ -1,8 +1,11 @@
 """``nvidia-kernel-energy-multisession``: one pooled model across sessions."""
 
+from typing import Optional, Sequence
+
 from energy_attribution.api import run_multisession
 from energy_attribution.cli import run_command
 from energy_attribution.config import MultiSessionConfig
+from energy_attribution.workflows.multisession import MultiSessionResult
 from energy_attribution.reporting.text import print_multisession_report
 
 DESCRIPTION = (
@@ -11,7 +14,8 @@ DESCRIPTION = (
 )
 
 
-def main(argv=None):
+def main(argv: Optional[Sequence[str]] = None) -> MultiSessionResult:
+    """Run the command with ``argv`` (default ``sys.argv``)."""
     return run_command(
         MultiSessionConfig,
         DESCRIPTION,

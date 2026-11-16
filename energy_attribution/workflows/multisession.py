@@ -16,6 +16,7 @@ from energy_attribution.families import TEMPERATURE_FAMILY
 from energy_attribution.prediction import PosteriorPredictions
 from energy_attribution.regression import PosteriorSamples, coefficient_summary_rows
 from energy_attribution.sessions import (
+    SessionWindows,
     build_session_windows,
     discover_session_paths,
     scan_sessions,
@@ -52,11 +53,17 @@ class MultiSessionResult:  # pylint: disable=too-many-instance-attributes
     summary: dict
 
 
-def pooled_dataset(sessions):
+def pooled_dataset(sessions: list[SessionWindows]) -> WindowDataset:
     """Stack every session's training windows first, then every holdout.
 
     Each ``SessionWindows.train_count`` marks that session's training prefix;
     the pooled rows ``[:train_count]`` are therefore all training windows.
+
+    Args:
+      sessions: Windowed sessions with their training counts.
+
+    Returns:
+      The pooled windows.
     """
     rows = []
     activity_parts = []
@@ -79,7 +86,17 @@ def pooled_dataset(sessions):
 
 
 def analyze(config: MultiSessionConfig) -> MultiSessionResult:
-    """Fit one pooled model across sessions without writing any file."""
+    """Fit one pooled model across sessions without writing any file.
+
+    Args:
+      config: Session root and model settings.
+
+    Returns:
+      The pooled fit, predictions, energy split and JSON summary.
+
+    Raises:
+      ValueError: If no usable session is found or the inputs are invalid.
+    """
     scan = scan_sessions(
         discover_session_paths(config.sessions_root), config.max_families
     )

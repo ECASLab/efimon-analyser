@@ -22,8 +22,23 @@ class PosteriorSamples:
     column_scale: np.ndarray
 
 
-def sample_lower_truncated_normal(mean, standard_deviation, rng):
-    """Draw from N(mean, sd) truncated to [0, infinity)."""
+def sample_lower_truncated_normal(
+    mean: float, standard_deviation: float, rng: np.random.Generator
+) -> float:
+    """Draw from N(mean, sd) truncated to [0, infinity).
+
+    Uses plain rejection when the mean is non-negative and Robert's
+    exponential proposal otherwise.
+
+    Args:
+      mean: Mean of the untruncated normal.
+      standard_deviation: Its standard deviation; zero returns
+        ``max(0, mean)``.
+      rng: Random generator.
+
+    Returns:
+      One non-negative draw.
+    """
     if standard_deviation <= 0.0:
         return max(0.0, mean)
     lower = -mean / standard_deviation
@@ -40,16 +55,42 @@ def sample_lower_truncated_normal(mean, standard_deviation, rng):
 
 
 def fit_nonnegative_bayesian_regression(
-    design,
-    target,
-    train_count,
-    prior_scale_w,
-    noise_prior_scale_w,
-    burn_in,
-    posterior_draws,
-    thin,
-    seed,
-):
+    design: np.ndarray,
+    target: np.ndarray,
+    train_count: int,
+    prior_scale_w: float,
+    noise_prior_scale_w: float,
+    burn_in: int,
+    posterior_draws: int,
+    thin: int,
+    seed: int,
+) -> PosteriorSamples:
+    """Sample a linear power model with non-negative coefficients.
+
+    The model is ``target = design @ beta + noise`` with
+    ``noise ~ N(0, sigma2)``. Columns are divided by their training RMS
+    before sampling; each scaled coefficient has a normal prior with standard
+    deviation ``prior_scale_w`` truncated to non-negative values, and
+    ``sigma2`` an inverse-gamma prior with shape 2 and rate
+    ``noise_prior_scale_w**2``. Gibbs sampling updates one coefficient at a
+    time from its truncated-normal conditional, then ``sigma2``.
+
+    Args:
+      design: (windows, parameters) design matrix; only the first
+        ``train_count`` rows are fitted.
+      target: Measured power per window in watts.
+      train_count: Number of leading training rows.
+      prior_scale_w: Prior standard deviation of the scaled coefficients.
+      noise_prior_scale_w: Square root of the inverse-gamma prior rate.
+      burn_in: Discarded initial iterations.
+      posterior_draws: Number of saved draws.
+      thin: Iterations between saved draws.
+      seed: Random seed.
+
+    Returns:
+      The posterior draws, in watts per unit of each unscaled column, and
+      the latent mean prediction for every design row.
+    """
     train_design = design[:train_count]
     train_target = target[:train_count]
     column_scale = np.sqrt(np.mean(train_design * train_design, axis=0))
@@ -95,7 +136,7 @@ def fit_nonnegative_bayesian_regression(
     return PosteriorSamples(draws, noise_draws, draws @ design.T, column_scale)
 
 
-def posterior_summary(values):
+def posterior_summary(values: np.ndarray) -> tuple[float, float, float, float]:
     """Return (mean, median, lower 2.5%, upper 97.5%) of 1-D draws as floats."""
     lower, upper = np.quantile(values, [0.025, 0.975])
     return (
@@ -107,18 +148,29 @@ def posterior_summary(values):
 
 
 def coefficient_summary_rows(
-    terms,
-    coefficient_draws,
-    column_scale,
+    terms: list[str],
+    coefficient_draws: np.ndarray,
+    column_scale: np.ndarray,
     *,
-    prefix="posterior_power_",
-    suffix="_w",
-    include_median=False,
-):
+    prefix: str = "posterior_power_",
+    suffix: str = "_w",
+    include_median: bool = False,
+) -> list[dict]:
     """One CSV row per model term with posterior mean and 95% interval.
 
     Column names are ``{prefix}{mean|median|lower_95|upper_95}{suffix}`` plus
     ``activity_rms_scale``; the kernel and transfer CSVs differ only there.
+
+    Args:
+      terms: Name of each design column.
+      coefficient_draws: (draws, terms) posterior coefficients.
+      column_scale: Training RMS of each design column.
+      prefix: Leading part of the summary column names.
+      suffix: Trailing part of the summary column names.
+      include_median: Also report the posterior median.
+
+    Returns:
+      One dictionary per term.
     """
     rows = []
     for index, term in enumerate(terms):
