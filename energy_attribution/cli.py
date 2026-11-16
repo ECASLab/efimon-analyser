@@ -15,6 +15,26 @@ from energy_attribution.config import ATTRIBUTION_MODES
 ConfigT = TypeVar("ConfigT")
 
 HELP = {
+    "window_ms": "Analysis window length in milliseconds.",
+    "idle_power_mw": (
+        "Power (mW) subtracted from every telemetry sample before "
+        "attribution; 0 attributes the whole device power."
+    ),
+    "train_fraction": (
+        "Leading share of each session's windows used for fitting; the rest "
+        "is the temporal holdout."
+    ),
+    "prior_scale_w": (
+        "Prior standard deviation (W) of each coefficient after scaling its "
+        "column to unit RMS."
+    ),
+    "noise_prior_scale_w": (
+        "Scale (W) of the inverse-gamma prior on the observation noise."
+    ),
+    "burn_in": "Gibbs iterations discarded before saving draws.",
+    "posterior_draws": "Posterior draws kept.",
+    "thin": "Gibbs iterations between saved draws.",
+    "seed": "Random seed; the same seed reproduces the same results.",
     "telemetry": "NVML telemetry CSV (gpu_telemetry.csv).",
     "kernels": "CUPTI kernel activity CSV (kernel_activity.csv).",
     "sessions_root": "Directory whose subdirectories are profiling sessions.",
@@ -146,7 +166,10 @@ def run_command(
     Returns:
       The analysis result.
     """
-    parser = argparse.ArgumentParser(description=description)
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     add_config_arguments(parser, config_type)
     namespace = parser.parse_args(argv)
     configure_logging()
