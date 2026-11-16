@@ -1,25 +1,23 @@
 """Check vectorized window aggregation against loop references."""
 
 import csv
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from energy_attribution import windows  # pylint: disable=wrong-import-position
-from energy_attribution.diagnostics import (  # pylint: disable=wrong-import-position
+from energy_attribution import windows
+from energy_attribution.diagnostics import (
     check_identifiability,
 )
-from energy_attribution.io import (  # pylint: disable=wrong-import-position
+from energy_attribution.io import (
     PowerTrace,
     load_kernels,
     load_power_trace,
 )
-from energy_attribution.sessions import (  # pylint: disable=wrong-import-position
+from energy_attribution.sessions import (
     add_temperature_column,
 )
 

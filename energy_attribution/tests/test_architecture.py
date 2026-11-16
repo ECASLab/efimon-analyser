@@ -2,16 +2,13 @@
 
 import argparse
 import ast
-import sys
 import unittest
 from dataclasses import MISSING, fields
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# pylint: disable=wrong-import-position
 from energy_attribution import config as config_module
 from energy_attribution.allocation import posterior_energy_allocation
 from energy_attribution.cli import add_config_arguments, config_from_namespace

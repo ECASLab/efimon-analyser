@@ -24,19 +24,18 @@ import unittest
 
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from energy_attribution.tests.synthetic import (  # pylint: disable=wrong-import-position
+from energy_attribution.tests.synthetic import (
     write_fixture,
 )
-from energy_attribution import (  # pylint: disable=wrong-import-position
+from energy_attribution import (
     MultiSessionConfig,
     SingleSessionConfig,
     analyze_multisession,
     analyze_single_session,
     run_single_session,
 )
-from energy_attribution.cli import (  # pylint: disable=wrong-import-position
+from energy_attribution.cli import (
     config_from_namespace,
 )
 
