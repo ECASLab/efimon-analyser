@@ -1,0 +1,391 @@
+"""End-to-end regression tests for the Bayesian kernel-energy commands.
+
+Each scenario runs a CLI script on deterministic synthetic sessions and
+compares every CSV and JSON output with the golden copies in ``golden/``:
+column names and order must match exactly, numbers within 1e-9 relative.
+
+After an intended behaviour change, regenerate the golden files with:
+
+    UPDATE_GOLDEN=1 python3 -m pytest \
+        energy_attribution/tests/test_regression.py
+"""
+
+from argparse import Namespace
+import csv
+import gzip
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from energy_attribution.tests.synthetic import (  # pylint: disable=wrong-import-position
+    write_fixture,
+)
+from energy_attribution import (  # pylint: disable=wrong-import-position
+    MultiSessionConfig,
+    SingleSessionConfig,
+    analyze_multisession,
+    analyze_single_session,
+    run_single_session,
+)
+from energy_attribution.cli import (  # pylint: disable=wrong-import-position
+    config_from_namespace,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+GOLDEN_ROOT = Path(__file__).resolve().parent / "golden"
+# Scenarios checked against another scenario's golden outputs.
+GOLDEN_ALIASES = {"multisession_gz": "multisession"}
+UPDATE_GOLDEN = os.environ.get("UPDATE_GOLDEN") == "1"
+RELATIVE_TOLERANCE = 1e-9
+ABSOLUTE_TOLERANCE = 1e-9
+# Summary keys holding temporary paths, which differ between runs.
+PATH_KEYS = {"sessions_root", "training_sessions_root", "external_test_session"}
+
+
+class ConfigurationTests(unittest.TestCase):
+    """Exercise the typed public configuration boundary."""
+
+    def test_namespace_conversion_preserves_typed_paths(self):
+        namespace = Namespace(
+            telemetry=Path("telemetry.csv"),
+            kernels=Path("kernels.csv"),
+            output_dir=Path("output"),
+            window_ms=250.0,
+            idle_power_mw=1_500.0,
+            max_families=8,
+            train_fraction=0.75,
+            prior_scale_w=100.0,
+            noise_prior_scale_w=10.0,
+            burn_in=20,
+            posterior_draws=100,
+            thin=1,
+            seed=7,
+            attribution="model",
+            min_windows_per_parameter=2.0,
+            allow_underdetermined=False,
+            min_window_fraction=0.9,
+            plot=False,
+            skip_event_output=True,
+        )
+        config = config_from_namespace(SingleSessionConfig, namespace)
+        config.validate()
+        self.assertEqual(config.window_ns, 250_000_000)
+        self.assertEqual(config.telemetry, Path("telemetry.csv"))
+        self.assertTrue(config.skip_event_output)
+
+    def test_workflow_specific_validation(self):
+        with self.assertRaisesRegex(ValueError, "train_fraction"):
+            MultiSessionConfig(
+                sessions_root=Path("sessions"),
+                output_dir=Path("output"),
+                train_fraction=1.0,
+            ).validate()
+
+
+def scenarios(fixture):
+    single = fixture / "train" / "s3-mixed"
+    session_files = [
+        "--telemetry",
+        str(single / "gpu_telemetry.csv"),
+        "--kernels",
+        str(single / "kernel_activity.csv"),
+    ]
+    return {
+        "single": [
+            "kernel_energy",
+            *session_files,
+            "--max-families",
+            "5",
+            "--plot",
+        ],
+        "single_legacy": [
+            "kernel_energy",
+            *session_files,
+            "--max-families",
+            "5",
+            "--attribution",
+            "active-fraction",
+            "--min-window-fraction",
+            "0",
+            "--skip-event-output",
+        ],
+        "multisession": [
+            "kernel_energy_multisession",
+            "--sessions-root",
+            str(fixture / "train"),
+            "--max-families",
+            "5",
+        ],
+        "multisession_gz": [
+            "kernel_energy_multisession",
+            "--sessions-root",
+            str(fixture / "train-gz"),
+            "--max-families",
+            "5",
+        ],
+    }
+
+
+def gzip_kernel_copy(source, destination):
+    """Copy session directories, gzip-compressing each kernel CSV."""
+    shutil.copytree(source, destination)
+    for kernels in destination.glob("*/kernel_activity.csv"):
+        with (
+            kernels.open("rb") as plain,
+            gzip.open(kernels.with_name(kernels.name + ".gz"), "wb") as packed,
+        ):
+            shutil.copyfileobj(plain, packed)
+        kernels.unlink()
+
+
+def as_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def values_match(expected, actual):
+    expected_number, actual_number = as_number(expected), as_number(actual)
+    if expected_number is None or actual_number is None:
+        return expected == actual
+    if math.isnan(expected_number) or math.isnan(actual_number):
+        return math.isnan(expected_number) and math.isnan(actual_number)
+    return math.isclose(
+        expected_number,
+        actual_number,
+        rel_tol=RELATIVE_TOLERANCE,
+        abs_tol=ABSOLUTE_TOLERANCE,
+    )
+
+
+def read_csv_rows(path):
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.reader(handle))
+
+
+def compare_json(expected, actual, location="$"):
+    """Yield human-readable differences between two JSON documents."""
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        if set(expected) != set(actual):
+            yield (
+                f"{location}: keys differ "
+                f"{sorted(set(expected) ^ set(actual))}"
+            )
+        for key in set(expected) & set(actual):
+            if key not in PATH_KEYS:
+                yield from compare_json(
+                    expected[key], actual[key], f"{location}.{key}"
+                )
+    elif isinstance(expected, list) and isinstance(actual, list):
+        if len(expected) != len(actual):
+            yield f"{location}: length {len(expected)} != {len(actual)}"
+        for index, (left, right) in enumerate(zip(expected, actual)):
+            yield from compare_json(left, right, f"{location}[{index}]")
+    elif (
+        isinstance(expected, bool)
+        or expected is None
+        or isinstance(expected, str)
+    ):
+        if expected != actual:
+            yield f"{location}: {expected!r} != {actual!r}"
+    elif not values_match(expected, actual):
+        yield f"{location}: {expected!r} != {actual!r}"
+
+
+class WorkflowRegressionTests(unittest.TestCase):
+    """Compare current command outputs with stored golden outputs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        root = Path(cls.temporary.name)
+        fixture = write_fixture(root / "fixture")
+        gzip_kernel_copy(fixture / "train", fixture / "train-gz")
+        cls.fixture = fixture
+        cls.root = root
+        cls.outputs = {}
+        for name, command in scenarios(fixture).items():
+            output = root / "outputs" / name
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    f"energy_attribution.commands.{command[0]}",
+                    *command[1:],
+                    "--output-dir",
+                    str(output),
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            cls.outputs[name] = output
+            if UPDATE_GOLDEN and name not in GOLDEN_ALIASES:
+                golden = GOLDEN_ROOT / name
+                shutil.rmtree(golden, ignore_errors=True)
+                golden.mkdir(parents=True)
+                for path in output.iterdir():
+                    if path.suffix in (".csv", ".json"):
+                        shutil.copy(path, golden / path.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def assert_matches_golden(self, name):
+        golden = GOLDEN_ROOT / GOLDEN_ALIASES.get(name, name)
+        output = self.outputs[name]
+        expected_files = sorted(
+            path.name
+            for path in golden.iterdir()
+            if path.suffix in (".csv", ".json")
+        )
+        actual_files = sorted(
+            path.name
+            for path in output.iterdir()
+            if path.suffix in (".csv", ".json")
+        )
+        self.assertEqual(
+            expected_files, actual_files, f"{name}: output files differ"
+        )
+        for file_name in expected_files:
+            with self.subTest(scenario=name, file=file_name):
+                if file_name.endswith(".json"):
+                    differences = list(
+                        compare_json(
+                            json.loads((golden / file_name).read_text()),
+                            json.loads((output / file_name).read_text()),
+                        )
+                    )
+                    self.assertFalse(differences, "\n".join(differences[:10]))
+                    continue
+                expected = read_csv_rows(golden / file_name)
+                actual = read_csv_rows(output / file_name)
+                self.assertEqual(expected[0], actual[0], "CSV columns differ")
+                self.assertEqual(
+                    len(expected), len(actual), "CSV row counts differ"
+                )
+                mismatches = [
+                    f"row {row}, {expected[0][column]}: {left!r} != {right!r}"
+                    for row, (expected_row, actual_row) in enumerate(
+                        zip(expected[1:], actual[1:]), start=1
+                    )
+                    for column, (left, right) in enumerate(
+                        zip(expected_row, actual_row)
+                    )
+                    if not values_match(left, right)
+                ]
+                self.assertFalse(mismatches, "\n".join(mismatches[:10]))
+
+    def test_single_session(self):
+        self.assert_matches_golden("single")
+        for plot in (
+            "bayesian_kernel_family_energy.png",
+            "bayesian_kernel_power_fit.png",
+            "bayesian_kernel_energy_test_scatter.png",
+            "bayesian_session_energy.png",
+        ):
+            self.assertTrue((self.outputs["single"] / plot).is_file(), plot)
+
+    def test_single_session_legacy_attribution(self):
+        self.assert_matches_golden("single_legacy")
+
+    def test_multisession(self):
+        self.assert_matches_golden("multisession")
+
+    def test_multisession_reads_gzip_kernel_csv(self):
+        self.assert_matches_golden("multisession_gz")
+
+    def api_config(self, name, **overrides):
+        session = self.fixture / "train" / "s3-mixed"
+        settings = {
+            "telemetry": session / "gpu_telemetry.csv",
+            "kernels": session / "kernel_activity.csv",
+            "output_dir": self.root / "outputs" / name,
+            "max_families": 5,
+            "posterior_draws": 100,
+            "burn_in": 50,
+            "thin": 1,
+            "skip_event_output": True,
+        }
+        settings.update(overrides)
+        return SingleSessionConfig(**settings)
+
+    def test_public_api_returns_typed_result(self):
+        """The supported library boundary works without importing a CLI."""
+        config = self.api_config("public-api")
+        result = run_single_session(config)
+        self.assertEqual(result.summary["kernel_families"], 5)
+        self.assertGreater(result.summary["test_windows"], 0)
+        self.assertEqual(len(result.family_rows), 5)
+        self.assertTrue(
+            (
+                config.output_dir / "bayesian_kernel_energy_summary.json"
+            ).is_file()
+        )
+
+    def test_analyze_writes_nothing(self):
+        config = self.api_config("analyze-only", skip_event_output=False)
+        result = analyze_single_session(config)
+        self.assertFalse(config.output_dir.exists())
+        self.assertIsNotNone(result.events)
+        # Events conserve the energy attributed to families.
+        self.assertAlmostEqual(
+            float(result.events.mean.sum()),
+            result.accounting["attributed_posterior_mean_mj"],
+            delta=1e-6 * result.accounting["attributed_posterior_mean_mj"],
+        )
+
+    def test_multisession_temperature_feature(self):
+        """The temperature column is fitted as one extra non-kernel term."""
+        settings = {
+            "sessions_root": self.fixture / "train",
+            "output_dir": self.root / "outputs" / "temperature",
+            "max_families": 5,
+            "posterior_draws": 100,
+            "burn_in": 50,
+            "thin": 1,
+        }
+        base = analyze_multisession(MultiSessionConfig(**settings))
+        result = analyze_multisession(
+            MultiSessionConfig(
+                **settings,
+                temperature_feature=True,
+                temperature_reference_c=20.0,
+            )
+        )
+        self.assertEqual(result.families, base.families + ["__temperature__"])
+        self.assertEqual(
+            result.summary["kernel_families"], base.summary["kernel_families"]
+        )
+        self.assertEqual(result.summary["temperature_reference_c"], 20.0)
+        self.assertNotIn("temperature_reference_c", base.summary)
+        self.assertEqual(result.coefficient_rows[-1]["term"], "__temperature__")
+        self.assertTrue(
+            all("temperature_c" in row for row in result.dataset.rows)
+        )
+        temperature_row = next(
+            row
+            for row in result.family_rows
+            if row["kernel_family"] == "__temperature__"
+        )
+        self.assertEqual(temperature_row["event_count"], 0)
+        self.assertLess(
+            abs(result.accounting["conservation_error_mj"]),
+            1e-6 * result.accounting["measured_dynamic_energy_mj"],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
